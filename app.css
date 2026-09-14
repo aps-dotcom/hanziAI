@@ -974,3 +974,5 @@ main {
   .practice { display: grid; grid-template-columns: minmax(0, 400px) minmax(0, 1fr); gap: 36px; align-items: start; }
   .chips { flex-wrap: wrap; overflow: visible; margin-inline: 0; padding-inline: 0; }
 }
+.seg button[aria-selected="true"] { background: var(--ink); color: var(--paper); font-weight: 500; }
+.seg button[aria-selected="true"] .han { opacity: 1; }
