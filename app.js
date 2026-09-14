@@ -511,19 +511,24 @@
   }
 
   /* ================================================ выбор набора */
-  function chooseSet(chars) {
-    openPanel('В какой набор?', chars.length + ' ' + plural(chars.length, 'знак', 'знака', 'знаков'), function (inner) {
+  function chooseSet(chars, isWords) {
+    var unit = isWords
+      ? plural(chars.length, 'слово', 'слова', 'слов')
+      : plural(chars.length, 'знак', 'знака', 'знаков');
+    openPanel('В какой набор?', chars.length + ' ' + unit, function (inner) {
       function pick(id, name) {
-        var have = HZ.setChars(id);
+        var have = isWords ? HZ.setWords(id) : HZ.setChars(id);
         var all = chars.every(function (c) { return have.indexOf(c) >= 0; });
         return h('button', {
           class: 'rowitem', onclick: function () {
-            var n = HZ.addTo(id, chars);
+            var n = isWords ? HZ.addWordsTo(id, chars) : HZ.addTo(id, chars);
             closePanel();
             toast(n ? 'В «' + name + '» добавлено: ' + n : 'Уже в наборе', n ? {
               label: 'Отменить',
               fn: function () {
-                chars.forEach(function (c) { HZ.removeFrom(id, c); });
+                chars.forEach(function (c) {
+                  if (isWords) HZ.removeWordFrom(id, c); else HZ.removeFrom(id, c);
+                });
                 if (current === 'sets') render();
               }
             } : null);
@@ -533,7 +538,11 @@
           h('span', { class: 'lead sm', text: all ? '✓' : '+' }),
           h('span', { class: 'm' }, [
             h('b', { text: name }),
-            h('span', { text: have.length + ' ' + plural(have.length, 'знак', 'знака', 'знаков') })
+            h('span', {
+              text: have.length + ' ' + (isWords
+                ? plural(have.length, 'слово', 'слова', 'слов')
+                : plural(have.length, 'знак', 'знака', 'знаков'))
+            })
           ]),
           icon(I.chev, 'chev')
         ]);
@@ -566,8 +575,25 @@
   var pickMode = 'learn';
   var pickSet = 'hsk1';
 
+  var tkind = 'chars';                 // тренируем знаки или слова
+  var pickWSet = 'hsk1';
+
+  /** Переключатель «Знаки / Слова» на экране тренировки. */
+  function trainSwitch() {
+    var box = h('div', { class: 'seg', role: 'tablist' });
+    [['chars', 'Знаки', '字'], ['words', 'Слова', '词']].forEach(function (x) {
+      box.appendChild(h('button', {
+        role: 'tab', 'aria-selected': tkind === x[0] ? 'true' : 'false',
+        onclick: function () { if (tkind === x[0]) return; tkind = x[0]; render(); }
+      }, [h('span', { class: 'han', text: x[2] }), h('span', { text: x[1] })]));
+    });
+    return box;
+  }
+
   function renderTrain() {
     if (session) { renderSession(); return; }
+    if (wsession) { renderWordSession(); return; }
+    if (tkind === 'words') { renderTrainWords(); return; }
     setHead('занятие', 'Тренировка');
 
     var draft = HZ.loadSession();
@@ -590,6 +616,8 @@
         ])
       ]));
     }
+
+    body.appendChild(trainSwitch());
 
     body.appendChild(h('div', { class: 'figures' }, [
       fig(todayN, 'сегодня'), fig(dueAll, 'повторить'),
@@ -654,6 +682,182 @@
       var A = HZ.by(a), B = HZ.by(b);
       return (A ? A[7] : 9999) - (B ? B[7] : 9999);
     });
+  }
+
+  /** Экран тренировки слов: выбрать набор и учить карточками. */
+  function renderTrainWords() {
+    setHead('занятие', 'Слова');
+    var body = h('div', { class: 'stack' });
+    body.appendChild(trainSwitch());
+    mainEl.appendChild(body);
+
+    var host = h('div');
+    body.appendChild(host);
+    host.appendChild(loadingBlock('Загружаю словарь слов…'));
+
+    HZ.loadWords().then(function () {
+      host.textContent = '';
+      var dk = new Date().toISOString().slice(0, 10);
+      host.appendChild(h('div', { class: 'figures' }, [
+        fig(HZ.state.stats.days[dk] || 0, 'сегодня'),
+        fig(HZ.wordsDue(), 'повторить'),
+        fig(HZ.wordsKnown(), 'начато'),
+        fig(HZ.state.favw.length, 'в избранном')
+      ]));
+
+      var sets = [{ id: 'dueW', n: 'К повторению' }, { id: 'fav', n: 'Избранное' }]
+        .concat(HZ.virtualSets().map(function (s) { return { id: s.id, n: s.name }; }))
+        .concat(HZ.state.sets.map(function (s) { return { id: s.id, n: s.name }; }));
+      var chipsRow = h('div', { class: 'chips' });
+      sets.forEach(function (s) {
+        var n = HZ.setWords(s.id).length;
+        chipsRow.appendChild(h('button', {
+          class: 'chip', 'aria-pressed': pickWSet === s.id ? 'true' : 'false',
+          text: s.n + ' · ' + n,
+          onclick: function () { pickWSet = s.id; render(); }
+        }));
+      });
+      host.appendChild(section('Что учим', chipsRow));
+      setTimeout(function () {
+        var on = chipsRow.querySelector('[aria-pressed="true"]');
+        if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest', inline: 'center' });
+      }, 0);
+
+      var words = HZ.setWords(pickWSet);
+      var due = words.filter(function (w) { return HZ.wordDue(w); });
+      host.appendChild(h('button', {
+        class: 'btn seal wide', disabled: words.length ? null : 'disabled',
+        onclick: function () { if (words.length) startWordSession(due.length ? due : words); }
+      }, [icon(I.eye), 'Начать · ' + (due.length ? due.length + ' к повтору' : 'новые слова')]));
+
+      if (words.length) {
+        var preview = (due.length ? due : words).slice(0, 8).map(function (w) { return HZ.wordRow(w); }).filter(Boolean);
+        host.appendChild(section('Первые в очереди', wordList(preview, {}),
+          words.length > 20 ? 'За один заход — до 20 слов, остальные в следующий раз.' : null));
+      } else {
+        host.appendChild(h('div', { class: 'empty' }, [
+          h('span', { class: 'mk han', text: '空' }),
+          h('p', { text: 'Здесь пока нет слов. Найдите их во вкладке «Иероглифы» → «Слова» и добавьте в набор.' })
+        ]));
+      }
+    }).catch(function (e) {
+      host.textContent = '';
+      host.appendChild(errorBlock((e && e.message) || 'Не удалось загрузить словарь слов.', function () { render(); }));
+    });
+  }
+
+  /* --------------------------------------------- карточки со словами */
+  var wsession = null;
+
+  function startWordSession(words) {
+    var list = (words || []).filter(function (w) { return HZ.wordRow(w); });
+    if (!list.length) { toast('Нечего учить'); return; }
+    list.sort(function (a, b) {
+      var ra = HZ.wrec(a), rb = HZ.wrec(b);
+      return (ra ? ra.d : -1) - (rb ? rb.d : -1);
+    });
+    if (list.length > 20) list = list.slice(0, 20);
+    wsession = { list: list, i: 0, know: 0, again: 0, startedAt: Date.now(), done: false };
+    session = null;
+    current = 'train';
+    refPage = null;
+    Array.prototype.forEach.call(tabEl.children, function (b) {
+      b.setAttribute('aria-selected', b.id === 'tab-train' ? 'true' : 'false');
+    });
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  function renderWordSession() {
+    var s = wsession;
+    if (s.i >= s.list.length) { s.done = true; renderWordSummary(); return; }
+    var w = s.list[s.i];
+    var row = HZ.wordRow(w);
+
+    setHead('карточки', (s.i + 1) + ' из ' + s.list.length, [
+      h('button', {
+        class: 'ib', 'aria-label': 'Закончить', onclick: function () { wsession = null; render(); }
+      }, [icon(I.x)])
+    ]);
+
+    var dots = h('div', { class: 'dots' }, s.list.map(function (_, k) {
+      return h('i', { class: k < s.i ? 'done' : (k === s.i ? 'now' : '') });
+    }));
+
+    var answer = h('div', { class: 'cardback', hidden: true });
+    answer.appendChild(h('div', { class: 'row s wrap center' }, [
+      pinyinLine(row[1], { big: true }),
+      wordSound(row[0], row[1], 'ib big')
+    ]));
+    answer.appendChild(h('p', { class: 'gloss', text: row[2] || '' }));
+    answer.appendChild(h('button', {
+      class: 'btn quiet s', onclick: function () { openWord(w); }
+    }, [icon(I.eye), 'Полный разбор']));
+
+    var grades = h('div', { class: 'row s grades', hidden: true }, [
+      h('button', {
+        class: 'btn wide bad', onclick: function () { answered('no'); }
+      }, ['Не помню']),
+      h('button', {
+        class: 'btn wide', onclick: function () { answered('soon'); }
+      }, ['Почти']),
+      h('button', {
+        class: 'btn wide good', onclick: function () { answered('know'); }
+      }, ['Знаю'])
+    ]);
+
+    var showBtn = h('button', {
+      class: 'btn seal wide', onclick: function () {
+        answer.hidden = false;
+        grades.hidden = false;
+        showBtn.hidden = true;
+        if (HZ.state.settings.autoAudio) HZ.playWord(row[1]);
+      }
+    }, [icon(I.eye), 'Показать ответ']);
+
+    function answered(res) {
+      HZ.wgrade(w, res);
+      if (res === 'know') s.know++; else s.again++;
+      s.i++;
+      render();
+      window.scrollTo(0, 0);
+    }
+
+    mainEl.appendChild(h('div', { class: 'cardwrap' }, [
+      h('div', { class: 'cardface' }, [
+        h('div', { class: 'wbig han', text: row[0] }),
+        h('span', { class: 'tag', text: 'HSK ' + row[3] })
+      ]),
+      dots,
+      showBtn,
+      answer,
+      grades
+    ]));
+
+    mainEl.appendChild(h('p', { class: 'tiny dim center', style: 'margin-top:18px',
+      text: 'Вспомните чтение и перевод, потом проверьте себя. Ответ влияет на то, когда слово встретится снова.' }));
+  }
+
+  function renderWordSummary() {
+    var s = wsession;
+    setHead('карточки', 'Готово');
+    mainEl.appendChild(h('div', { class: 'figures' }, [
+      fig(s.list.length, 'слов'),
+      fig(s.know, 'вспомнили'),
+      fig(s.again, 'к повтору')
+    ]));
+    mainEl.appendChild(h('div', { class: 'row s wrap', style: 'margin-top:22px' }, [
+      h('button', {
+        class: 'btn seal', onclick: function () {
+          var again = s.list.filter(function (w) { return HZ.wordDue(w); });
+          wsession = null;
+          if (again.length) startWordSession(again); else { toast('На сегодня всё повторено'); render(); }
+        }
+      }, [icon(I.play), 'Повторить трудные']),
+      h('button', {
+        class: 'btn', onclick: function () { wsession = null; render(); }
+      }, ['К тренировке'])
+    ]));
   }
 
   /* ------------------------------------------------------- сеанс */
@@ -933,8 +1137,203 @@
 
   /* ==================================================== ИЕРОГЛИФЫ */
   var bq = '', bfilter = { sort: 'freq' }, bselect = null;
+  var bkind = 'chars';                       // «Иероглифы» или «Слова»
+  var wq = '', wfilter = { sort: 'hsk', multi: true };
+
+  /** Переключатель «Иероглифы / Слова» над поиском. */
+  function kindSwitch(onChange) {
+    var box = h('div', { class: 'seg', role: 'tablist' });
+    [['chars', 'Иероглифы', '字'], ['words', 'Слова', '词']].forEach(function (x) {
+      box.appendChild(h('button', {
+        role: 'tab', 'aria-selected': bkind === x[0] ? 'true' : 'false',
+        onclick: function () { if (bkind === x[0]) return; bkind = x[0]; onChange(); }
+      }, [h('span', { class: 'han', text: x[2] }), h('span', { text: x[1] })]));
+    });
+    return box;
+  }
+
+  /* ========================================================= СЛОВА */
+  /** Пиньинь по слогам: каждый слог кликабелен и звучит отдельно. */
+  function pinyinLine(pinyin, opts) {
+    opts = opts || {};
+    var parts = HZ.sylls(pinyin);
+    return h('span', { class: 'pyline' + (opts.big ? ' big' : '') }, parts.map(function (p) {
+      return h('button', {
+        class: 'sy t' + p.tone, type: 'button',
+        title: HZ.TONE_RU[p.tone][0] + (p.gen ? ' · собранная запись' : ''),
+        onclick: function (e) {
+          e.stopPropagation();
+          if (p.key) HZ.playKey(p.key);
+        }
+      }, [h('span', { text: p.s })]);
+    }));
+  }
+
+  function wordSound(w, pinyin, cls) {
+    return h('button', {
+      class: cls || 'ib', 'aria-label': 'Прослушать слово', title: 'Прослушать слово целиком',
+      onclick: function (e) {
+        e.stopPropagation();
+        HZ.playWord(pinyin).then(function (ok) {
+          if (!ok && !HZ.speak(w)) toast('Записи для этого слова нет');
+        });
+      }
+    }, [icon(I.sound)]);
+  }
+
+  function wordItem(r, opts) {
+    opts = opts || {};
+    var kids = [
+      h('span', { class: 'wd han', text: r[0] }),
+      h('span', { class: 'm' }, [
+        pinyinLine(r[1]),
+        h('span', { class: 'tr', text: r[2] || '—' })
+      ]),
+      h('span', { class: 'lvl', text: 'HSK' + r[3] }),
+      wordSound(r[0], r[1])
+    ];
+    if (HZ.state.favw.indexOf(r[0]) >= 0) kids.unshift(icon(I.star, 'fav'));
+    var rec = HZ.wrec(r[0]);
+    if (rec) kids.push(h('span', { class: 'box', title: 'Закрепление ' + rec.b + ' из 6' },
+      [h('i', { style: 'width:' + Math.round(rec.b / 6 * 100) + '%' })]));
+    var el = h('button', {
+      class: 'wordrow', 'aria-pressed': (opts.isSelected && opts.isSelected(r[0])) ? 'true' : null,
+      onclick: function () { opts.onClick ? opts.onClick(r, el) : openWord(r[0]); }
+    }, kids);
+    return el;
+  }
+
+  /** Длинный список слов с подгрузкой по мере прокрутки. */
+  function wordList(rows, opts) {
+    var wrap = h('div', { class: 'wordlist' });
+    var n = 0, STEP = 60;
+    var sentinel = h('div', { style: 'height:1px' });
+    var io = new IntersectionObserver(function (e) { if (e[0].isIntersecting) more(); }, { rootMargin: '600px' });
+    function more() {
+      var end = Math.min(rows.length, n + STEP);
+      for (; n < end; n++) wrap.insertBefore(wordItem(rows[n], opts), sentinel);
+      if (n >= rows.length) io.disconnect();
+    }
+    wrap.appendChild(sentinel);
+    more();
+    io.observe(sentinel);
+    observers.push(io);
+    return wrap;
+  }
+
+  function openWord(w) {
+    var row = HZ.wordRow(w);
+    if (!row) { toast('Слова ' + w + ' нет в базе'); return; }
+    openPanel('Разбор слова', row[0] + ' · ' + row[1], function (inner, bar) {
+      var fb = h('button', {
+        class: 'ib' + (HZ.state.favw.indexOf(w) >= 0 ? ' on' : ''),
+        'aria-label': 'В избранное', title: 'В избранное',
+        onclick: function () {
+          var now = HZ.toggleFavWord(w);
+          fb.className = 'ib' + (now ? ' on' : '');
+          toast(now ? 'В избранном' : 'Убрано из избранного');
+        }
+      }, [icon(I.star)]);
+      bar.appendChild(fb);
+      bar.appendChild(h('button', {
+        class: 'ib', 'aria-label': 'Добавить в набор', title: 'Добавить в набор',
+        onclick: function () { chooseSet([w], true); }
+      }, [icon(I.plus)]));
+      fill();
+
+      function fill() {
+        inner.textContent = '';
+        inner.appendChild(loadingBlock('Собираю разбор…'));
+        HZ.wordDetail(w).then(function (det) {
+          inner.textContent = '';
+          buildWordSheet(inner, row, det || {});
+          if (HZ.state.settings.autoAudio) HZ.playWord(row[1]);
+        }).catch(function (e) {
+          inner.textContent = '';
+          inner.appendChild(errorBlock((e && e.message) || 'Не удалось загрузить слово.', fill));
+        });
+      }
+    });
+  }
+
+  function buildWordSheet(inner, row, det) {
+    var parts = HZ.sylls(row[1]);
+    var approx = parts.some(function (p) { return p.gen; });
+
+    inner.appendChild(h('div', { class: 'wordhead' }, [
+      h('div', { class: 'big han', text: row[0] }),
+      h('div', { class: 'meta' }, [
+        h('div', { class: 'row s wrap' }, [
+          pinyinLine(row[1], { big: true }),
+          wordSound(row[0], row[1], 'ib big')
+        ]),
+        h('p', { class: 'gloss', text: row[2] || '' }),
+        h('div', { class: 'row xs wrap' }, [
+          h('span', { class: 'tag', text: 'HSK ' + row[3] }),
+          h('span', { class: 'tag t5', text: row[0].length + ' ' + plural(row[0].length, 'знак', 'знака', 'знаков') })
+        ])
+      ])
+    ]));
+
+    inner.appendChild(section('Тоны по слогам', h('div', { class: 'rows' }, parts.map(function (p) {
+      return h('div', { class: 'rowitem static' }, [
+        h('span', { class: 'lead sm t' + p.tone, text: p.s }),
+        h('span', { class: 'm' }, [
+          h('b', { text: HZ.TONE_RU[p.tone][0] }),
+          h('span', { text: HZ.TONE_RU[p.tone][1] })
+        ]),
+        p.key ? h('button', {
+          class: 'ib', 'aria-label': 'Прослушать слог',
+          onclick: function () { HZ.playKey(p.key); }
+        }, [icon(I.sound)]) : h('span', { class: 'tiny dim', text: 'нет записи' })
+      ]);
+    })), approx
+      ? 'Слоги без тона (нейтральные) собраны из ровной записи того же слога — это приближение, а не живой голос диктора.'
+      : null));
+
+    var chars = row[0].split('').filter(function (c) { return HZ.by(c); });
+    if (chars.length) {
+      inner.appendChild(section('Знаки в слове', h('div', { class: 'rows' }, chars.map(function (c) {
+        var cr = HZ.by(c);
+        return h('button', {
+          class: 'rowitem', onclick: function () { openChar(c); }
+        }, [
+          h('span', { class: 'lead han', text: c }),
+          h('span', { class: 'm' }, [
+            h('b', { text: cr[1] }),
+            h('span', { text: cr[3] })
+          ]),
+          icon(I.chev, 'chev')
+        ]);
+      })), 'Нажмите на знак, чтобы увидеть ключи, порядок черт и написать его.'));
+    }
+
+    if (det.f && det.f.length) {
+      inner.appendChild(section('Все значения', h('ol', { class: 'defs' },
+        det.f.map(function (s) { return h('li', { text: s }); }))));
+    }
+    if (det.e) {
+      inner.appendChild(section('По-английски', h('p', { class: 'note', text: det.e })));
+    }
+
+    inner.appendChild(h('div', { class: 'row s wrap', style: 'margin-top:20px' }, [
+      h('button', {
+        class: 'btn seal', onclick: function () {
+          closeAllPanels();
+          startSession(chars, 'memory');
+        }
+      }, [icon(I.pen), 'Написать знаки слова']),
+      h('button', {
+        class: 'btn', onclick: function () {
+          closeAllPanels();
+          startWordSession([row[0]]);
+        }
+      }, [icon(I.eye), 'Карточка слова'])
+    ]));
+  }
 
   function renderBrowse() {
+    if (bkind === 'words') { renderWords(); return; }
     var chipsEl = h('div', { class: 'stack xs' });
     var selBar = h('div');
     var results = h('div');
@@ -956,6 +1355,7 @@
     }, [icon(I.check)]);
 
     mainEl.appendChild(h('div', { class: 'stack s' }, [
+      kindSwitch(function () { render(); }),
       h('label', { class: 'fld', for: 'q' }, [icon(I.search), input]),
       h('p', { class: 'tiny dim', text: 'Пиньинь — как удобно: hao, hao3 или hǎo. Перевод — по части слова.' }),
       chipsEl
@@ -1036,6 +1436,126 @@
     return h('button', { class: 'chip', 'aria-pressed': on ? 'true' : 'false', text: label, onclick: fn });
   }
 
+  /* --------------------------------------------- список слов (词) */
+  var wselect = null;
+
+  function renderWords() {
+    setHead('словарь', 'Слова');
+    var host = h('div');
+    mainEl.appendChild(h('div', { class: 'stack s' }, [kindSwitch(function () { render(); })]));
+    mainEl.appendChild(host);
+
+    host.appendChild(loadingBlock('Загружаю словарь слов…'));
+    HZ.loadWords().then(function () {
+      host.textContent = '';
+      buildWordsUI(host);
+    }).catch(function (e) {
+      host.textContent = '';
+      host.appendChild(errorBlock((e && e.message) || 'Не удалось загрузить словарь слов.', function () {
+        render();
+      }));
+    });
+  }
+
+  function buildWordsUI(host) {
+    var chipsEl = h('div', { class: 'stack xs' });
+    var selBar = h('div');
+    var results = h('div');
+    var cntEl = null;
+
+    var input = h('input', {
+      id: 'wq', type: 'search', value: wq, placeholder: 'слово, пиньинь или перевод',
+      autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false'
+    });
+    var t = null;
+    input.addEventListener('input', function () {
+      clearTimeout(t);
+      t = setTimeout(function () { wq = input.value; refresh(); }, 230);
+    });
+
+    var selBtn = h('button', {
+      class: 'ib', 'aria-label': 'Выбрать несколько', title: 'Выбрать несколько',
+      onclick: function () { wselect = wselect ? null : []; refresh(); }
+    }, [icon(I.check)]);
+
+    host.appendChild(h('div', { class: 'stack s' }, [
+      h('label', { class: 'fld', for: 'wq' }, [icon(I.search), input]),
+      h('p', { class: 'tiny dim', text: 'Например: lao shi, 老师 или «учитель». Нажмите на слог, чтобы услышать его отдельно.' }),
+      chipsEl
+    ]));
+    host.appendChild(selBar);
+    host.appendChild(h('div', { style: 'height:14px' }));
+    host.appendChild(results);
+
+    function refresh() {
+      var res = HZ.wordSearch(wq, wfilter);
+      setHead(res.length + ' из ' + HZ.words.length, 'Слова', [selBtn]);
+      selBtn.className = 'ib' + (wselect ? ' on' : '');
+
+      chipsEl.textContent = '';
+      var lv = h('div', { class: 'chips' });
+      lv.appendChild(chip('Все уровни', !wfilter.level, function () { delete wfilter.level; refresh(); }));
+      for (var l = 1; l <= 6; l++) (function (l) {
+        lv.appendChild(chip('HSK ' + l, wfilter.level === l, function () {
+          if (wfilter.level === l) delete wfilter.level; else wfilter.level = l;
+          refresh();
+        }));
+      })(l);
+      var so = h('div', { class: 'chips' });
+      so.appendChild(chip('только сочетания', !!wfilter.multi, function () {
+        wfilter.multi = !wfilter.multi; refresh();
+      }));
+      so.appendChild(chip('избранные', wfilter.only === HZ.state.favw, function () {
+        if (wfilter.only) delete wfilter.only; else wfilter.only = HZ.state.favw;
+        refresh();
+      }));
+      chipsEl.appendChild(lv);
+      chipsEl.appendChild(so);
+
+      selBar.textContent = '';
+      cntEl = null;
+      if (wselect) {
+        cntEl = h('span', { class: 'grow small', text: 'Отмечено: ' + wselect.length });
+        selBar.appendChild(h('div', {
+          class: 'row wrap s', style: 'padding:12px 0;border-bottom:1px solid var(--rule)'
+        }, [
+          cntEl,
+          h('button', {
+            class: 'btn s', onclick: function () {
+              if (!wselect.length) { toast('Сначала отметьте слова'); return; }
+              chooseSet(wselect.slice(), true);
+            }
+          }, [icon(I.plus), 'В набор']),
+          h('button', {
+            class: 'btn s', onclick: function () {
+              if (!wselect.length) { toast('Сначала отметьте слова'); return; }
+              startWordSession(wselect.slice());
+            }
+          }, [icon(I.eye), 'Учить'])
+        ]));
+      }
+
+      results.textContent = '';
+      if (!res.length) {
+        results.appendChild(h('div', { class: 'empty' }, [
+          h('span', { class: 'mk han', text: '無' }),
+          h('p', { text: 'Ничего не нашлось. Попробуйте пиньинь без тонов или часть перевода.' })
+        ]));
+        return;
+      }
+      results.appendChild(wordList(res, {
+        isSelected: wselect ? function (w) { return wselect.indexOf(w) >= 0; } : null,
+        onClick: wselect ? function (r, el) {
+          var i = wselect.indexOf(r[0]);
+          if (i >= 0) { wselect.splice(i, 1); el.removeAttribute('aria-pressed'); }
+          else { wselect.push(r[0]); el.setAttribute('aria-pressed', 'true'); }
+          if (cntEl) cntEl.textContent = 'Отмечено: ' + wselect.length;
+        } : null
+      }));
+    }
+    refresh();
+  }
+
   /* ======================================================= КЛЮЧИ */
   function renderRads() {
     var rads = HZ.rads();
@@ -1095,11 +1615,14 @@
 
   function setRow(id, name, note) {
     var chars = HZ.setChars(id);
+    var words = HZ.setWords(id);
+    var what = chars.length + ' ' + plural(chars.length, 'знак', 'знака', 'знаков');
+    if (words.length) what += ', ' + words.length + ' ' + plural(words.length, 'слово', 'слова', 'слов');
     return h('button', { class: 'rowitem', onclick: function () { openSet(id); } }, [
-      h('span', { class: 'lead han', text: chars.length ? chars[0] : '·' }),
+      h('span', { class: 'lead han', text: chars.length ? chars[0] : (words.length ? words[0][0] : '·') }),
       h('span', { class: 'm' }, [
         h('b', { text: name }),
-        h('span', { text: note + ' · ' + chars.length + ' ' + plural(chars.length, 'знак', 'знака', 'знаков') })
+        h('span', { text: note + ' · ' + what })
       ]),
       icon(I.chev, 'chev')
     ]);
@@ -1153,23 +1676,57 @@
           }, [icon(I.trash), 'Удалить']) : null
         ].filter(Boolean)));
 
-        if (!rows.length) {
+        var words = HZ.setWords(id);
+        if (!rows.length && !words.length) {
           inner.appendChild(h('div', { class: 'empty' }, [
             h('span', { class: 'mk han', text: '空' }),
             h('p', { text: 'Здесь пока пусто.' })
           ]));
           return;
         }
-        if (editing) inner.appendChild(h('p', { class: 'note warn', text: 'Нажмите на знак, чтобы убрать его из набора.' }));
-        inner.appendChild(grid(rows, {
-          onClick: editing ? function (row) {
-            HZ.removeFrom(id, row[0]);
-            draw();
-            toast('Знак ' + row[0] + ' убран', {
-              label: 'Вернуть', fn: function () { HZ.addTo(id, [row[0]]); draw(); }
-            });
-          } : null
-        }));
+        if (editing) inner.appendChild(h('p', { class: 'note warn', text: 'Нажмите на знак или слово, чтобы убрать из набора.' }));
+        if (rows.length) {
+          inner.appendChild(grid(rows, {
+            onClick: editing ? function (row) {
+              HZ.removeFrom(id, row[0]);
+              draw();
+              toast('Знак ' + row[0] + ' убран', {
+                label: 'Вернуть', fn: function () { HZ.addTo(id, [row[0]]); draw(); }
+              });
+            } : null
+          }));
+        }
+        if (words.length) drawWords(words);
+      }
+
+      /** Слова набора: словарь подгружается только если они там есть. */
+      function drawWords(words) {
+        var host = h('div');
+        inner.appendChild(h('div', { style: 'height:20px' }));
+        inner.appendChild(host);
+        host.appendChild(loadingBlock('Загружаю слова…'));
+        HZ.loadWords().then(function () {
+          host.textContent = '';
+          var rows = words.map(function (w) { return HZ.wordRow(w); }).filter(Boolean);
+          host.appendChild(section('Слова · ' + rows.length, h('div', {}, [
+            h('button', {
+              class: 'btn s seal', style: 'margin-bottom:12px',
+              onclick: function () { closeAllPanels(); startWordSession(words); }
+            }, [icon(I.eye), 'Учить карточками']),
+            wordList(rows, {
+              onClick: editing ? function (r) {
+                HZ.removeWordFrom(id, r[0]);
+                draw();
+                toast('Слово ' + r[0] + ' убрано', {
+                  label: 'Вернуть', fn: function () { HZ.addWordsTo(id, [r[0]]); draw(); }
+                });
+              } : null
+            })
+          ])));
+        }).catch(function () {
+          host.textContent = '';
+          host.appendChild(h('p', { class: 'note bad', text: 'Словарь слов не загрузился.' }));
+        });
       }
       draw();
     }, function () { if (current === 'sets') render(); });
@@ -1578,9 +2135,11 @@
       src('Русские значения и чтения',
         'Большой китайско-русский словарь 大БКРС (bkrs.info) — значения знаков, чтения и переводы слов. Пиньинь сверен с CC-CEDICT.'),
       src('Произношение',
-        'Записи отдельных слогов с тонами: набор mp3-chinese-pinyin-sound (общественное достояние), дополнен несколькими слогами из подборки Chinese-Pinyin-Audio. Слова озвучивает синтез речи устройства.'),
+        'Записи отдельных слогов с тонами: набор mp3-chinese-pinyin-sound (общественное достояние), дополнен несколькими слогами из подборки Chinese-Pinyin-Audio. Слово звучит как последовательность своих слогов.'),
+      src('Нейтральный тон',
+        'Слоги без тона (轻声) в наборах записей почти не представлены. Подставлять вместо них второй тон нельзя: «shén me» превратилось бы в «shén mé» — другое слово и неверная привычка. Поэтому такие слоги собраны из записи первого (ровного) тона: короче, ниже и тише. Это приближение, и в разборе слова оно помечено.'),
       src('Списки и частотность',
-        'Официальные списки слов HSK 1–6 (2012) — 2663 иероглифа. Частота по корпусу субтитров SUBTLEX-CH.'),
+        'Официальные списки слов HSK 1–6 (2012): 2663 иероглифа и 4995 слов, из них 4287 — сочетания из двух и более знаков. Частота по корпусу субтитров SUBTLEX-CH.'),
       h('p', { class: 'note', text: 'На домашний экран: в Safari — «Поделиться» → «На экран „Домой“»; в Chrome — меню → «Добавить на главный экран». Всё открытое кэшируется, дальше приложение работает и без сети.' })
     ]));
   }

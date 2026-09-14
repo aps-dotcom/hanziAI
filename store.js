@@ -128,6 +128,50 @@
     }).catch(function () { return false; });
   }
 
+  /** Проиграть слоги подряд — так звучит слово целиком. */
+  function playSeq(keys, gap) {
+    keys = (keys || []).filter(Boolean);
+    if (!keys.length) return Promise.resolve(false);
+    gap = gap == null ? 90 : gap;
+    var stop = false;
+    seqStop = function () { stop = true; };
+    return keys.reduce(function (chain, key, i) {
+      return chain.then(function (okAll) {
+        if (stop) return okAll;
+        return playKeyWait(key).then(function (ok) {
+          if (i < keys.length - 1 && !stop) {
+            return new Promise(function (r) { setTimeout(function () { r(okAll && ok); }, gap); });
+          }
+          return okAll && ok;
+        });
+      });
+    }, Promise.resolve(true));
+  }
+  var seqStop = null;
+
+  /** Как playKey, но ждёт окончания записи. */
+  function playKeyWait(key) {
+    var chunk = (window.HZ_AUMAP || {})[key];
+    if (chunk == null) return Promise.resolve(false);
+    return loadChunk('au', chunk).then(function () {
+      var b = (window.HZ_AU[chunk] || {})[key];
+      if (!b) return false;
+      if (!audioCache[key]) audioCache[key] = 'data:audio/mpeg;base64,' + b;
+      return new Promise(function (res) {
+        try {
+          var a = new Audio(audioCache[key]);
+          var done = false;
+          var fin = function (ok) { if (!done) { done = true; res(ok); } };
+          a.onended = function () { fin(true); };
+          a.onerror = function () { fin(false); };
+          setTimeout(function () { fin(true); }, 2600);   // на случай зависшей записи
+          var p = a.play();
+          if (p && p.catch) p.catch(function () { fin(false); });
+        } catch (e) { res(false); }
+      });
+    }).catch(function () { return false; });
+  }
+
   function speak(text) {
     try {
       if (!window.speechSynthesis) return false;
@@ -140,13 +184,121 @@
     } catch (e) { return false; }
   }
 
+  /* ========================================================= слова */
+  window.HZ_WD = window.HZ_WD || {};
+  var WORDS = [], WPOS = {}, wordsP = null;
+
+  function loadScript(src, attempt) {
+    return new Promise(function (res, rej) {
+      var s = document.createElement('script');
+      s.src = src + (attempt ? '?r=' + attempt : '');
+      s.async = true;
+      s.onload = function () { res(); };
+      s.onerror = function () {
+        s.remove();
+        if ((attempt || 0) < 2) {
+          setTimeout(function () { loadScript(src, (attempt || 0) + 1).then(res, rej); }, 700 * ((attempt || 0) + 1));
+        } else {
+          rej(new Error('Не удалось загрузить словарь слов'));
+        }
+      };
+      document.head.appendChild(s);
+    });
+  }
+
+  /** Словарь слов грузится по требованию: на запуске он не нужен. */
+  function loadWords() {
+    if (WORDS.length) return Promise.resolve(WORDS);
+    if (wordsP) return wordsP;
+    wordsP = loadScript('data/words.js', 0).then(function () {
+      WORDS = window.HZ_WORDS || [];
+      WPOS = {};
+      WORDS.forEach(function (r, i) { WPOS[r[0]] = i; });
+      return WORDS;
+    }).catch(function (e) { wordsP = null; throw e; });
+    return wordsP;
+  }
+
+  /** Слоги слова: [{s:'lǎo', key:'lao3', tone:3, gen:false}] */
+  function sylls(pinyin) {
+    return String(pinyin || '').trim().split(/\s+/).filter(Boolean).map(function (s) {
+      var tone = toneOf(s);
+      var key = plainPy(s).replace(/[1-5]$/, '') + tone;
+      var have = (window.HZ_AUMAP || {})[key] != null;
+      return {
+        s: s, tone: tone,
+        key: have ? key : '',
+        gen: have && (window.HZ_GEN5 || []).indexOf(key) >= 0
+      };
+    });
+  }
+  function wordKeys(pinyin) {
+    return sylls(pinyin).map(function (x) { return x.key; });
+  }
+  function playWord(pinyin) { return playSeq(wordKeys(pinyin)); }
+
+  function wordRow(w) { return WPOS[w] != null ? WORDS[WPOS[w]] : null; }
+
+  function wordDetail(w) {
+    var n = (window.HZ_WDMAP || {})[w];
+    if (n == null) return Promise.resolve({});
+    return loadChunk('wd', n).then(function () { return (window.HZ_WD[n] || {})[w] || {}; });
+  }
+
+  function wordSearch(q, filters) {
+    filters = filters || {};
+    var res = WORDS;
+    if (filters.level) res = res.filter(function (r) { return r[3] === filters.level; });
+    if (filters.multi) res = res.filter(function (r) { return r[0].length > 1; });
+    if (filters.only) res = res.filter(function (r) { return filters.only.indexOf(r[0]) >= 0; });
+    if (filters.has) res = res.filter(function (r) { return r[0].indexOf(filters.has) >= 0; });
+    q = (q || '').trim().toLowerCase();
+    if (q) {
+      var han = q.split('').filter(function (c) { return c >= '㐀' && c <= '鿿'; }).join('');
+      var scored = [];
+      if (han) {
+        res.forEach(function (r) {
+          if (r[0] === han) scored.push([0, r]);
+          else if (r[0].indexOf(han) === 0) scored.push([1, r]);
+          else if (r[0].indexOf(han) >= 0) scored.push([2, r]);
+        });
+      } else {
+        var qp = plainPy(q).replace(/\s+/g, '');
+        res.forEach(function (r) {
+          var flat = plainPy(r[1]).replace(/\s+/g, '').replace(/[1-5]/g, '');
+          var gl = (r[2] || '').toLowerCase();
+          var rank = -1;
+          if (qp && flat === qp) rank = 0;
+          else if (qp && qp.length > 1 && flat.indexOf(qp) === 0) rank = 1;
+          if (rank < 0) {
+            if (gl === q) rank = 0;
+            else if (gl.indexOf(q) === 0) rank = 2;
+            else if (gl.indexOf(' ' + q) >= 0 || gl.indexOf(', ' + q) >= 0) rank = 3;
+            else if (gl.indexOf(q) >= 0) rank = 4;
+            else if (qp && qp.length > 1 && flat.indexOf(qp) > 0) rank = 5;
+          }
+          if (rank >= 0) scored.push([rank, r]);
+        });
+      }
+      scored.sort(function (a, b) { return a[0] - b[0] || a[1][3] - b[1][3] || a[1][0].length - b[1][0].length; });
+      return scored.map(function (x) { return x[1]; });
+    }
+    var arr = res.slice();
+    var sort = filters.sort || 'hsk';
+    if (sort === 'hsk') arr.sort(function (a, b) { return a[3] - b[3] || a[0].length - b[0].length; });
+    else if (sort === 'len') arr.sort(function (a, b) { return a[0].length - b[0].length || a[3] - b[3]; });
+    return arr;
+  }
+
   /* ===================================================== хранилище */
   var DEFAULT = {
-    v: 2,
+    v: 3,
     ts: 0,
     fav: [],
+    favw: [],
     sets: [],
     srs: {},
+    wsrs: {},
     settings: {
       grid: 'tian',
       numbers: true,
@@ -188,12 +340,16 @@
     var s = clone(DEFAULT);
     if (!raw || typeof raw !== 'object') return s;
     if (Array.isArray(raw.fav)) s.fav = raw.fav.filter(function (c) { return typeof c === 'string' && c.length === 1; });
+    if (Array.isArray(raw.favw)) {
+      s.favw = raw.favw.filter(function (c) { return typeof c === 'string' && c.length > 1 && c.length <= 8; });
+    }
     if (Array.isArray(raw.sets)) {
       s.sets = raw.sets.filter(function (x) { return x && typeof x.id === 'string'; }).map(function (x) {
         return {
           id: String(x.id).slice(0, 40),
           name: String(x.name == null ? 'Набор' : x.name).slice(0, 60),
-          chars: Array.isArray(x.chars) ? x.chars.filter(function (c) { return typeof c === 'string' && c.length === 1; }) : []
+          chars: Array.isArray(x.chars) ? x.chars.filter(function (c) { return typeof c === 'string' && c.length === 1; }) : [],
+          words: Array.isArray(x.words) ? x.words.filter(function (c) { return typeof c === 'string' && c.length > 1 && c.length <= 8; }) : []
         };
       });
     }
@@ -206,6 +362,19 @@
           d: +r.d || 0,
           n: Math.max(0, +r.n || 0),
           e: Math.max(0, +r.e || 0),
+          ok: Math.max(0, +r.ok || 0),
+          t: +r.t || 0
+        };
+      });
+    }
+    if (raw.wsrs && typeof raw.wsrs === 'object') {
+      Object.keys(raw.wsrs).forEach(function (w) {
+        var r = raw.wsrs[w];
+        if (!r || typeof r !== 'object' || w.length > 8) return;
+        s.wsrs[w] = {
+          b: Math.max(0, Math.min(6, +r.b || 0)),
+          d: +r.d || 0,
+          n: Math.max(0, +r.n || 0),
           ok: Math.max(0, +r.ok || 0),
           t: +r.t || 0
         };
@@ -507,6 +676,33 @@
   }
   function stepDays(box) { return STEPS[Math.max(0, Math.min(STEPS.length - 1, box))]; }
 
+  /* --------------------------------- повторение слов (узнавание) */
+  function wrec(w) { return state.wsrs[w] || null; }
+  function wordDue(w) {
+    var r = wrec(w);
+    return !r || r.d <= today();
+  }
+  /** res: 'know' — вспомнил, 'soon' — почти, 'no' — не вспомнил. */
+  function wgrade(w, res) {
+    var r = state.wsrs[w] || { b: 0, d: 0, n: 0, ok: 0 };
+    if (res === 'know') r.b = Math.min(STEPS.length - 1, r.b + 1);
+    else if (res === 'soon') r.b = Math.max(1, Math.min(STEPS.length - 1, r.b));
+    else r.b = 0;
+    r.n++;
+    if (res === 'know') r.ok++;
+    r.d = today() + STEPS[r.b];
+    r.t = Date.now();
+    state.wsrs[w] = r;
+    var dk = new Date().toISOString().slice(0, 10);
+    state.stats.days[dk] = (state.stats.days[dk] || 0) + 1;
+    save({ backup: true });
+    return r;
+  }
+  function wordsKnown() { return Object.keys(state.wsrs).length; }
+  function wordsDue() {
+    return Object.keys(state.wsrs).filter(function (w) { return wordDue(w); }).length;
+  }
+
   /* ======================================================= наборы */
   function virtualSets() {
     var out = [];
@@ -537,6 +733,50 @@
   }
   function isOwnSet(id) {
     return state.sets.some(function (x) { return x.id === id; });
+  }
+
+  /* ------------------------------------------- слова внутри наборов */
+  function setWords(id) {
+    if (id === 'fav') return state.favw.slice();
+    if (id === 'dueW') return Object.keys(state.wsrs).filter(function (w) { return wordDue(w); });
+    var m = /^hsk(\d)$/.exec(id);
+    if (m) return WORDS.filter(function (r) { return r[3] === +m[1] && r[0].length > 1; }).map(function (r) { return r[0]; });
+    var s = state.sets.filter(function (x) { return x.id === id; })[0];
+    return s && s.words ? s.words.slice() : [];
+  }
+  function toggleFavWord(w) {
+    var i = state.favw.indexOf(w);
+    if (i >= 0) state.favw.splice(i, 1); else state.favw.push(w);
+    save();
+    return i < 0;
+  }
+  function addWordsTo(setId, list) {
+    if (setId === 'fav') {
+      var k = 0;
+      list.forEach(function (w) { if (state.favw.indexOf(w) < 0) { state.favw.push(w); k++; } });
+      save();
+      return k;
+    }
+    var s = state.sets.filter(function (x) { return x.id === setId; })[0];
+    if (!s) return 0;
+    if (!s.words) s.words = [];
+    var n = 0;
+    list.forEach(function (w) { if (s.words.indexOf(w) < 0) { s.words.push(w); n++; } });
+    save();
+    return n;
+  }
+  function removeWordFrom(setId, w) {
+    if (setId === 'fav') {
+      var i = state.favw.indexOf(w);
+      if (i >= 0) state.favw.splice(i, 1);
+      save();
+      return;
+    }
+    var s = state.sets.filter(function (x) { return x.id === setId; })[0];
+    if (!s || !s.words) return;
+    var j = s.words.indexOf(w);
+    if (j >= 0) s.words.splice(j, 1);
+    save();
   }
   function toggleFav(ch) {
     var i = state.fav.indexOf(ch);
@@ -678,6 +918,25 @@
     search: search,
     playKey: playKey,
     speak: speak,
+
+    loadWords: loadWords,
+    get words() { return WORDS; },
+    wordRow: wordRow,
+    wordDetail: wordDetail,
+    wordSearch: wordSearch,
+    sylls: sylls,
+    wordKeys: wordKeys,
+    playWord: playWord,
+    playSeq: playSeq,
+    wrec: wrec,
+    wgrade: wgrade,
+    wordDue: wordDue,
+    wordsKnown: wordsKnown,
+    wordsDue: wordsDue,
+    setWords: setWords,
+    toggleFavWord: toggleFavWord,
+    addWordsTo: addWordsTo,
+    removeWordFrom: removeWordFrom,
     toneOf: toneOf,
     plainPy: plainPy,
     TONE_RU: TONE_RU,
